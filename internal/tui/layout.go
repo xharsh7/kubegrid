@@ -2,6 +2,8 @@ package tui
 
 import (
 	"strings"
+
+	"github.com/charmbracelet/lipgloss"
 )
 
 type nodeType int
@@ -24,60 +26,99 @@ func newPaneNode(p pane) *layoutNode {
 }
 
 func splitNode(target *layoutNode, vertical bool) *layoutNode {
+	if target.kind != nodePane {
+		return target
+	}
+
+	// Create a copy of the current pane
 	old := *target
+	
+	// Transform this node into a split
 	if vertical {
 		target.kind = nodeSplitV
 	} else {
 		target.kind = nodeSplitH
 	}
+	
 	target.first = &old
 	target.second = newPaneNode(*old.pane)
 	target.pane = nil
+	
 	return target
 }
 
-func (n *layoutNode) render(width, height int) string {
+var (
+	activeStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("62"))
+	
+	inactiveStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("240"))
+)
+
+func (n *layoutNode) render(width, height int, activePane *layoutNode) string {
+	if n == nil {
+		return ""
+	}
+
 	if n.kind == nodePane {
+		// Render the pane content
 		view := n.pane.m.View()
 		lines := strings.Split(view, "\n")
 
-		var out []string
-		for i := 0; i < height; i++ {
+		// Calculate inner dimensions (account for borders)
+		innerWidth := width - 2
+		innerHeight := height - 2
+		if innerWidth < 1 {
+			innerWidth = 1
+		}
+		if innerHeight < 1 {
+			innerHeight = 1
+		}
+
+		var contentLines []string
+		for i := 0; i < innerHeight; i++ {
 			line := ""
 			if i < len(lines) {
 				line = lines[i]
 			}
-			if len(line) > width {
-				line = line[:width]
+			if len(line) > innerWidth {
+				line = line[:innerWidth]
 			}
-			out = append(out, padRight(line, width))
+			contentLines = append(contentLines, padRight(line, innerWidth))
 		}
-		return strings.Join(out, "\n")
+
+		content := strings.Join(contentLines, "\n")
+
+		// Apply border style based on active state
+		style := inactiveStyle
+		if n == activePane {
+			style = activeStyle
+		}
+
+		return style.Width(innerWidth).Height(innerHeight).Render(content)
 	}
 
 	if n.kind == nodeSplitV {
+		// Vertical split: side by side
 		w1 := width / 2
-		w2 := width - w1 - 1
+		w2 := width - w1
 
-		left := strings.Split(n.first.render(w1, height), "\n")
-		right := strings.Split(n.second.render(w2, height), "\n")
+		left := n.first.render(w1, height, activePane)
+		right := n.second.render(w2, height, activePane)
 
-		var out []string
-		for i := 0; i < height; i++ {
-			out = append(out, left[i]+"│"+right[i])
-		}
-		return strings.Join(out, "\n")
+		return lipgloss.JoinHorizontal(lipgloss.Top, left, right)
 	}
 
-	// Horizontal split
+	// Horizontal split: top and bottom
 	h1 := height / 2
-	h2 := height - h1 - 1
+	h2 := height - h1
 
-	top := strings.Split(n.first.render(width, h1), "\n")
-	bottom := strings.Split(n.second.render(width, h2), "\n")
+	top := n.first.render(width, h1, activePane)
+	bottom := n.second.render(width, h2, activePane)
 
-	bar := strings.Repeat("─", width)
-	return strings.Join(append(append(top, bar), bottom...), "\n")
+	return lipgloss.JoinVertical(lipgloss.Left, top, bottom)
 }
 
 func padRight(s string, w int) string {

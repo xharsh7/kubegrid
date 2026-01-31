@@ -5,6 +5,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/xharsh7/kubegrid/internal/cluster"
+	"github.com/xharsh7/kubegrid/internal/config"
 )
 
 type screen int
@@ -12,34 +13,53 @@ type screen int
 const (
 	screenList screen = iota
 	screenInspect
+	screenHelp
 )
 
-type model struct {
+type clusterViewModel struct {
 	clusters []cluster.ClusterStatus
 	cursor   int
 	refresh  func() []cluster.ClusterStatus
+	contexts []config.KubeContext
 
 	activeScreen screen
 }
 
-func NewClusterView(data []cluster.ClusterStatus, refreshFn func() []cluster.ClusterStatus) model {
-	return model{
+func NewClusterView(data []cluster.ClusterStatus, refreshFn func() []cluster.ClusterStatus) clusterViewModel {
+	return clusterViewModel{
 		clusters:     data,
 		refresh:      refreshFn,
 		activeScreen: screenList,
 	}
 }
 
-func (m model) Init() tea.Cmd {
+func (m clusterViewModel) Init() tea.Cmd {
 	return nil
 }
 
-func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m clusterViewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		// Help screen handling
+		if m.activeScreen == screenHelp {
+			m.activeScreen = screenList
+			return m, nil
+		}
+
 		switch msg.String() {
-		case "q", "ctrl+c":
+		case "q":
+			if m.activeScreen == screenInspect {
+				m.activeScreen = screenList
+				return m, nil
+			}
 			return m, tea.Quit
+
+		case "ctrl+c":
+			return m, tea.Quit
+
+		case "?":
+			m.activeScreen = screenHelp
+			return m, nil
 
 		case "up", "k":
 			if m.cursor > 0 {
@@ -50,6 +70,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.cursor < len(m.clusters)-1 {
 				m.cursor++
 			}
+
+		case "g":
+			m.cursor = 0
+
+		case "G":
+			m.cursor = len(m.clusters) - 1
 
 		case "r":
 			m.clusters = m.refresh()
@@ -65,8 +91,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // --------------------------------------------Retro Mainframe View---------------------------------------------
-func (m model) View() string {
+func (m clusterViewModel) View() string {
 	switch m.activeScreen {
+	case screenHelp:
+		return NewHelpView().View()
 	case screenInspect:
 		return m.inspectView()
 	default:
@@ -75,7 +103,7 @@ func (m model) View() string {
 }
 
 // --------------------------------------------Retro Mainframe View---------------------------------------------
-func (m model) listView() string {
+func (m clusterViewModel) listView() string {
 	var s string
 
 	header := "  KUBEGRID :: MULTI-CLUSTER OPERATIONS CONSOLE"
@@ -121,12 +149,12 @@ func (m model) listView() string {
 	}
 
 	s += "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛\n"
-	s += "  ↑↓ Navigate   R Refresh   Q Quit\n"
+	s += "  ↑↓/jk:Navigate g/G:Top/Bottom Enter:Inspect R:Refresh ?:Help Q:Quit\n"
 
 	return s
 }
 
-func (m model) inspectView() string {
+func (m clusterViewModel) inspectView() string {
 	c := m.clusters[m.cursor]
 
 	const width = 46
@@ -158,14 +186,7 @@ func (m model) inspectView() string {
 	}
 
 	s += "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛\n"
-	s += "  Esc Back   R Refresh\n"
+	s += "  Esc/Q:Back   R:Refresh\n"
 
 	return s
-}
-
-func truncate(s string, max int) string {
-	if len(s) <= max {
-		return s
-	}
-	return s[:max-3] + "..."
 }
