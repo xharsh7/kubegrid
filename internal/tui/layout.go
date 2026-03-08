@@ -3,6 +3,7 @@ package tui
 import (
 	"strings"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-runewidth"
 )
@@ -99,10 +100,6 @@ func (n *layoutNode) render(width, height int, activePane *layoutNode) string {
 	}
 
 	if n.kind == nodePane {
-		// Render the pane content
-		view := n.pane.m.View()
-		lines := strings.Split(view, "\n")
-
 		// Calculate inner dimensions (account for borders: 1 char each side)
 		innerWidth := width - 2
 		innerHeight := height - 2
@@ -112,6 +109,14 @@ func (n *layoutNode) render(width, height int, activePane *layoutNode) string {
 		if innerHeight < 1 {
 			innerHeight = 1
 		}
+
+		// Update pane model with actual dimensions before rendering
+		m, _ := n.pane.m.Update(tea.WindowSizeMsg{Width: innerWidth, Height: innerHeight})
+		n.pane.m = m
+
+		// Render the pane content
+		view := n.pane.m.View()
+		lines := strings.Split(view, "\n")
 
 		var contentLines []string
 		for i := 0; i < innerHeight; i++ {

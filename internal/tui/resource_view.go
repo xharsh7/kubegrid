@@ -56,6 +56,10 @@ type resourceViewModel struct {
 	viewingLogs bool
 	logs        string
 	logScroll   int
+
+	wantBack bool
+	width    int
+	height   int
 }
 
 type resourceLoadedMsg struct {
@@ -89,6 +93,11 @@ func (m resourceViewModel) Init() tea.Cmd {
 
 func (m resourceViewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		return m, nil
+
 	case tea.KeyMsg:
 		if m.filtering {
 			return m.handleFilterInput(msg)
@@ -99,7 +108,10 @@ func (m resourceViewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		switch msg.String() {
-		case "q", "ctrl+c":
+		case "esc":
+			m.wantBack = true
+			return m, nil
+		case "ctrl+c":
 			return m, tea.Quit
 
 		case "up", "k":
@@ -192,6 +204,14 @@ func (m resourceViewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewingLogs = true
 		m.logs = msg.logs
 		m.logScroll = 0
+
+	case podDeletedMsg:
+		if msg.err != nil {
+			m.error = msg.err
+		} else {
+			m.loading = true
+			return m, m.loadResources()
+		}
 	}
 
 	return m, nil
@@ -219,12 +239,25 @@ func (m resourceViewModel) handleLogInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "q", "esc":
 		m.viewingLogs = false
 		m.logs = ""
+		m.logScroll = 0
 	case "up", "k":
 		if m.logScroll > 0 {
 			m.logScroll--
 		}
 	case "down", "j":
-		m.logScroll++
+		// Clamp scroll to max
+		lines := strings.Split(m.logs, "\n")
+		maxVisible := m.height - 6
+		if maxVisible < 5 {
+			maxVisible = 5
+		}
+		maxScroll := len(lines) - maxVisible
+		if maxScroll < 0 {
+			maxScroll = 0
+		}
+		if m.logScroll < maxScroll {
+			m.logScroll++
+		}
 	}
 	return m, nil
 }
@@ -363,24 +396,42 @@ func (m resourceViewModel) View() string {
 		return m.renderLogs()
 	}
 
+	w := m.width
+	if w < 20 {
+		w = 80
+	}
+	inner := w
+	hline := strings.Repeat("━", inner)
+
 	var s strings.Builder
 
 	// Header
-	s.WriteString("┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓\n")
-	title := fmt.Sprintf("  KUBEGRID :: %s [%s] :: Namespace: %s",
+	s.WriteString("┏" + hline + "┓\n")
+	title := fmt.Sprintf("  %s [%s] ns:%s",
 		m.context.FriendlyName, m.resource.String(), m.namespace)
-	s.WriteString(fmt.Sprintf("┃%-78s┃\n", title))
-	s.WriteString("┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫\n")
+	if inner >= 60 {
+		title = fmt.Sprintf("  KUBEGRID :: %s [%s] :: Namespace: %s",
+			m.context.FriendlyName, m.resource.String(), m.namespace)
+	}
+	if len(title) > inner {
+		title = title[:inner]
+	}
+	s.WriteString(fmt.Sprintf("┃%-*s┃\n", inner, title))
+	s.WriteString("┣" + hline + "┫\n")
 
 	if m.loading {
-		s.WriteString("┃  Loading...                                                                  ┃\n")
-		s.WriteString("┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛\n")
+		s.WriteString(fmt.Sprintf("┃  Loading...%-*s┃\n", inner-12, ""))
+		s.WriteString("┗" + hline + "┛\n")
 		return s.String()
 	}
 
 	if m.error != nil {
-		s.WriteString(fmt.Sprintf("┃  Error: %-68s┃\n", m.error.Error()))
-		s.WriteString("┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛\n")
+		errStr := fmt.Sprintf("  Error: %s", m.error.Error())
+		if len(errStr) > inner {
+			errStr = errStr[:inner]
+		}
+		s.WriteString(fmt.Sprintf("┃%-*s┃\n", inner, errStr))
+		s.WriteString("┗" + hline + "┛\n")
 		return s.String()
 	}
 
@@ -397,21 +448,62 @@ func (m resourceViewModel) View() string {
 	}
 
 	// Footer
-	s.WriteString("┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛\n")
-	
+	s.WriteString("┗" + hline + "┛\n")
+
 	if m.filtering {
 		s.WriteString(fmt.Sprintf("  Filter: %s_\n", m.filterInput))
+	} else if inner >= 60 {
+		s.WriteString("  1:Pods 2:Deploy 3:Svc 4:NS | /:Filter L:Logs D:Del R:Ref N:NS Esc:Back\n")
 	} else {
-		s.WriteString("  1:Pods 2:Deploy 3:Svc 4:NS | /:Filter L:Logs D:Delete R:Refresh N:SwitchNS Q:Quit\n")
+		s.WriteString("  1-4:Res /:Flt L:Log D:Del R:Ref Esc:Back\n")
 	}
 
 	return s.String()
 }
 
 func (m resourceViewModel) renderPods() string {
+	w := m.width
+	if w < 20 {
+		w = 80
+	}
+	inner := w
+	hline := strings.Repeat("━", inner)
+
+	// Adaptive columns: hide less important ones in narrow panels
+	showRestarts := inner >= 70
+	showAge := inner >= 50
+
+	statusW := 9
+	readyW := 5
+	restartsW := 4
+	ageW := 5
+
+	fixed := 4 + statusW + readyW // " > " + status + ready
+	if showRestarts {
+		fixed += 1 + restartsW
+	}
+	if showAge {
+		fixed += 1 + ageW
+	}
+	nameW := inner - fixed
+	if nameW < 8 {
+		nameW = 8
+	}
+
 	var s strings.Builder
-	s.WriteString("┃   NAME                                      STATUS    READY  RESTARTS  AGE     ┃\n")
-	s.WriteString("┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫\n")
+	var colHeader string
+	if showRestarts && showAge {
+		colHeader = fmt.Sprintf("   %-*s %-*s %-*s %-*s %-*s",
+			nameW, "NAME", statusW, "STATUS", readyW, "READY", restartsW, "RST", ageW, "AGE")
+	} else if showAge {
+		colHeader = fmt.Sprintf("   %-*s %-*s %-*s %-*s",
+			nameW, "NAME", statusW, "STATUS", readyW, "READY", ageW, "AGE")
+	} else {
+		colHeader = fmt.Sprintf("   %-*s %-*s %-*s",
+			nameW, "NAME", statusW, "STATUS", readyW, "READY")
+	}
+	s.WriteString(fmt.Sprintf("┃%-*s┃\n", inner, colHeader))
+	s.WriteString("┣" + hline + "┫\n")
 
 	pods := m.getFilteredPods()
 	for i, pod := range pods {
@@ -420,21 +512,68 @@ func (m resourceViewModel) renderPods() string {
 			cursor = ">"
 		}
 
-		name := truncate(pod.Name, 40)
-		status := truncate(pod.Status, 9)
-		age := k8s.FormatAge(pod.Age)
+		name := truncate(pod.Name, nameW)
+		status := truncate(pod.Status, statusW)
+		age := truncate(k8s.FormatAge(pod.Age), ageW)
 
-		s.WriteString(fmt.Sprintf("┃ %s %-40s %-9s %-6s %-9d %-7s ┃\n",
-			cursor, name, status, pod.Ready, pod.Restarts, age))
+		var row string
+		if showRestarts && showAge {
+			row = fmt.Sprintf(" %s %-*s %-*s %-*s %-*d %-*s",
+				cursor, nameW, name, statusW, status, readyW, pod.Ready, restartsW, pod.Restarts, ageW, age)
+		} else if showAge {
+			row = fmt.Sprintf(" %s %-*s %-*s %-*s %-*s",
+				cursor, nameW, name, statusW, status, readyW, pod.Ready, ageW, age)
+		} else {
+			row = fmt.Sprintf(" %s %-*s %-*s %-*s",
+				cursor, nameW, name, statusW, status, readyW, pod.Ready)
+		}
+		s.WriteString(fmt.Sprintf("┃%-*s┃\n", inner, row))
 	}
 
 	return s.String()
 }
 
 func (m resourceViewModel) renderDeployments() string {
+	w := m.width
+	if w < 20 {
+		w = 80
+	}
+	inner := w
+	hline := strings.Repeat("━", inner)
+
+	showAvail := inner >= 60
+	showUpToDate := inner >= 50
+
+	readyW := 7
+	upToDateW := 4
+	availableW := 5
+
+	fixed := 4 + readyW
+	if showUpToDate {
+		fixed += 1 + upToDateW
+	}
+	if showAvail {
+		fixed += 1 + availableW
+	}
+	nameW := inner - fixed
+	if nameW < 8 {
+		nameW = 8
+	}
+
 	var s strings.Builder
-	s.WriteString("┃   NAME                                      READY     UP-TO-DATE  AVAILABLE  ┃\n")
-	s.WriteString("┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫\n")
+	var colHeader string
+	if showUpToDate && showAvail {
+		colHeader = fmt.Sprintf("   %-*s %-*s %-*s %-*s",
+			nameW, "NAME", readyW, "READY", upToDateW, "UTD", availableW, "AVAIL")
+	} else if showUpToDate {
+		colHeader = fmt.Sprintf("   %-*s %-*s %-*s",
+			nameW, "NAME", readyW, "READY", upToDateW, "UTD")
+	} else {
+		colHeader = fmt.Sprintf("   %-*s %-*s",
+			nameW, "NAME", readyW, "READY")
+	}
+	s.WriteString(fmt.Sprintf("┃%-*s┃\n", inner, colHeader))
+	s.WriteString("┣" + hline + "┫\n")
 
 	deployments := m.getFilteredDeployments()
 	for i, dep := range deployments {
@@ -443,19 +582,66 @@ func (m resourceViewModel) renderDeployments() string {
 			cursor = ">"
 		}
 
-		name := truncate(dep.Name, 40)
+		name := truncate(dep.Name, nameW)
 
-		s.WriteString(fmt.Sprintf("┃ %s %-40s %-9s %-11d %-10d ┃\n",
-			cursor, name, dep.Ready, dep.UpToDate, dep.Available))
+		var row string
+		if showUpToDate && showAvail {
+			row = fmt.Sprintf(" %s %-*s %-*s %-*d %-*d",
+				cursor, nameW, name, readyW, dep.Ready, upToDateW, dep.UpToDate, availableW, dep.Available)
+		} else if showUpToDate {
+			row = fmt.Sprintf(" %s %-*s %-*s %-*d",
+				cursor, nameW, name, readyW, dep.Ready, upToDateW, dep.UpToDate)
+		} else {
+			row = fmt.Sprintf(" %s %-*s %-*s",
+				cursor, nameW, name, readyW, dep.Ready)
+		}
+		s.WriteString(fmt.Sprintf("┃%-*s┃\n", inner, row))
 	}
 
 	return s.String()
 }
 
 func (m resourceViewModel) renderServices() string {
+	w := m.width
+	if w < 20 {
+		w = 80
+	}
+	inner := w
+	hline := strings.Repeat("━", inner)
+
+	showIP := inner >= 60
+	showPorts := inner >= 45
+
+	typeW := 10
+	ipW := 15
+	portsW := 10
+
+	fixed := 4 + typeW
+	if showIP {
+		fixed += 1 + ipW
+	}
+	if showPorts {
+		fixed += 1 + portsW
+	}
+	nameW := inner - fixed
+	if nameW < 8 {
+		nameW = 8
+	}
+
 	var s strings.Builder
-	s.WriteString("┃   NAME                          TYPE            CLUSTER-IP        PORTS      ┃\n")
-	s.WriteString("┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫\n")
+	var colHeader string
+	if showIP && showPorts {
+		colHeader = fmt.Sprintf("   %-*s %-*s %-*s %-*s",
+			nameW, "NAME", typeW, "TYPE", ipW, "CLUSTER-IP", portsW, "PORTS")
+	} else if showPorts {
+		colHeader = fmt.Sprintf("   %-*s %-*s %-*s",
+			nameW, "NAME", typeW, "TYPE", portsW, "PORTS")
+	} else {
+		colHeader = fmt.Sprintf("   %-*s %-*s",
+			nameW, "NAME", typeW, "TYPE")
+	}
+	s.WriteString(fmt.Sprintf("┃%-*s┃\n", inner, colHeader))
+	s.WriteString("┣" + hline + "┫\n")
 
 	services := m.getFilteredServices()
 	for i, svc := range services {
@@ -464,22 +650,62 @@ func (m resourceViewModel) renderServices() string {
 			cursor = ">"
 		}
 
-		name := truncate(svc.Name, 30)
-		svcType := truncate(svc.Type, 14)
-		ip := truncate(svc.ClusterIP, 15)
-		ports := truncate(svc.Ports, 11)
+		name := truncate(svc.Name, nameW)
+		svcType := truncate(svc.Type, typeW)
 
-		s.WriteString(fmt.Sprintf("┃ %s %-30s %-14s %-15s %-11s ┃\n",
-			cursor, name, svcType, ip, ports))
+		var row string
+		if showIP && showPorts {
+			ip := truncate(svc.ClusterIP, ipW)
+			ports := truncate(svc.Ports, portsW)
+			row = fmt.Sprintf(" %s %-*s %-*s %-*s %-*s",
+				cursor, nameW, name, typeW, svcType, ipW, ip, portsW, ports)
+		} else if showPorts {
+			ports := truncate(svc.Ports, portsW)
+			row = fmt.Sprintf(" %s %-*s %-*s %-*s",
+				cursor, nameW, name, typeW, svcType, portsW, ports)
+		} else {
+			row = fmt.Sprintf(" %s %-*s %-*s",
+				cursor, nameW, name, typeW, svcType)
+		}
+		s.WriteString(fmt.Sprintf("┃%-*s┃\n", inner, row))
 	}
 
 	return s.String()
 }
 
 func (m resourceViewModel) renderNamespaces() string {
+	w := m.width
+	if w < 20 {
+		w = 80
+	}
+	inner := w
+	hline := strings.Repeat("━", inner)
+
+	showAge := inner >= 40
+
+	statusW := 8
+	ageW := 5
+
+	fixed := 4 + statusW
+	if showAge {
+		fixed += 1 + ageW
+	}
+	nameW := inner - fixed
+	if nameW < 8 {
+		nameW = 8
+	}
+
 	var s strings.Builder
-	s.WriteString("┃   NAME                                                STATUS      AGE        ┃\n")
-	s.WriteString("┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫\n")
+	var colHeader string
+	if showAge {
+		colHeader = fmt.Sprintf("   %-*s %-*s %-*s",
+			nameW, "NAME", statusW, "STATUS", ageW, "AGE")
+	} else {
+		colHeader = fmt.Sprintf("   %-*s %-*s",
+			nameW, "NAME", statusW, "STATUS")
+	}
+	s.WriteString(fmt.Sprintf("┃%-*s┃\n", inner, colHeader))
+	s.WriteString("┣" + hline + "┫\n")
 
 	namespaces := m.getFilteredNamespaces()
 	for i, ns := range namespaces {
@@ -488,40 +714,83 @@ func (m resourceViewModel) renderNamespaces() string {
 			cursor = ">"
 		}
 
-		name := truncate(ns.Name, 50)
-		status := truncate(ns.Status, 10)
-		age := k8s.FormatAge(ns.Age)
+		name := truncate(ns.Name, nameW)
+		status := truncate(ns.Status, statusW)
 
-		s.WriteString(fmt.Sprintf("┃ %s %-50s %-10s %-10s ┃\n",
-			cursor, name, status, age))
+		var row string
+		if showAge {
+			age := truncate(k8s.FormatAge(ns.Age), ageW)
+			row = fmt.Sprintf(" %s %-*s %-*s %-*s",
+				cursor, nameW, name, statusW, status, ageW, age)
+		} else {
+			row = fmt.Sprintf(" %s %-*s %-*s",
+				cursor, nameW, name, statusW, status)
+		}
+		s.WriteString(fmt.Sprintf("┃%-*s┃\n", inner, row))
 	}
 
 	return s.String()
 }
 
 func (m resourceViewModel) renderLogs() string {
+	w := m.width
+	if w < 20 {
+		w = 80
+	}
+	inner := w
+	hline := strings.Repeat("━", inner)
+	contentW := inner - 2 // space for " " padding on each side
+	if contentW < 1 {
+		contentW = 1
+	}
+
 	var s strings.Builder
 
-	s.WriteString("┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓\n")
-	
+	s.WriteString("┏" + hline + "┓\n")
+
 	if m.cursor < len(m.pods) {
 		title := fmt.Sprintf("  LOGS :: %s", m.pods[m.cursor].Name)
-		s.WriteString(fmt.Sprintf("┃%-78s┃\n", title))
+		if len(title) > inner {
+			title = title[:inner]
+		}
+		s.WriteString(fmt.Sprintf("┃%-*s┃\n", inner, title))
 	}
-	
-	s.WriteString("┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫\n")
+
+	s.WriteString("┣" + hline + "┫\n")
 
 	lines := strings.Split(m.logs, "\n")
-	start := m.logScroll
-	maxLines := 20
-
-	for i := start; i < start+maxLines && i < len(lines); i++ {
-		line := truncate(lines[i], 76)
-		s.WriteString(fmt.Sprintf("┃ %-76s ┃\n", line))
+	// chrome: top border + title + separator + bottom border + footer = 5 lines
+	maxLines := m.height - 5
+	if maxLines < 3 {
+		maxLines = 3
 	}
 
-	s.WriteString("┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛\n")
-	s.WriteString("  ↑↓:Scroll  Q/Esc:Back\n")
+	// Clamp scroll
+	maxScroll := len(lines) - maxLines
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	start := m.logScroll
+	if start > maxScroll {
+		start = maxScroll
+	}
+
+	for i := start; i < start+maxLines && i < len(lines); i++ {
+		line := truncate(lines[i], contentW)
+		s.WriteString(fmt.Sprintf("┃ %-*s ┃\n", contentW, line))
+	}
+
+	// Pad if fewer lines than maxLines
+	shown := len(lines) - start
+	if shown > maxLines {
+		shown = maxLines
+	}
+	for i := shown; i < maxLines; i++ {
+		s.WriteString(fmt.Sprintf("┃ %-*s ┃\n", contentW, ""))
+	}
+
+	s.WriteString("┗" + hline + "┛\n")
+	s.WriteString("  ↑↓:Scroll  Esc:Back\n")
 
 	return s.String()
 }

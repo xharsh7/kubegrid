@@ -14,6 +14,7 @@ type screen int
 const (
 	screenList screen = iota
 	screenInspect
+	screenResource
 	screenHelp
 )
 
@@ -27,6 +28,7 @@ type clusterViewModel struct {
 	height   int
 
 	activeScreen screen
+	resourceView *resourceViewModel
 }
 
 func NewClusterView(data []cluster.ClusterStatus, refreshFn func() []cluster.ClusterStatus) clusterViewModel {
@@ -42,6 +44,23 @@ func (m clusterViewModel) Init() tea.Cmd {
 }
 
 func (m clusterViewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// When in resource screen, delegate all messages to resource view
+	if m.activeScreen == screenResource && m.resourceView != nil {
+		if wsm, ok := msg.(tea.WindowSizeMsg); ok {
+			m.width = wsm.Width
+			m.height = wsm.Height
+		}
+		updated, cmd := m.resourceView.Update(msg)
+		rv := updated.(resourceViewModel)
+		if rv.wantBack {
+			m.activeScreen = screenList
+			m.resourceView = nil
+			return m, nil
+		}
+		m.resourceView = &rv
+		return m, cmd
+	}
+
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -94,7 +113,21 @@ func (m clusterViewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.clusters = m.refresh()
 
 		case "enter":
-			m.activeScreen = screenInspect
+			if m.cursor < len(m.clusters) {
+				c := m.clusters[m.cursor]
+				if !c.Reachable {
+					m.activeScreen = screenInspect
+					return m, nil
+				}
+				rv, err := NewResourceView(c.Context, "default")
+				if err != nil {
+					m.activeScreen = screenInspect
+					return m, nil
+				}
+				m.resourceView = &rv
+				m.activeScreen = screenResource
+				return m, rv.Init()
+			}
 
 		case "esc":
 			m.activeScreen = screenList
@@ -110,6 +143,11 @@ func (m clusterViewModel) View() string {
 		return NewHelpView().View()
 	case screenInspect:
 		return m.inspectView()
+	case screenResource:
+		if m.resourceView != nil {
+			return m.resourceView.View()
+		}
+		return m.listView()
 	default:
 		return m.listView()
 	}
@@ -118,31 +156,46 @@ func (m clusterViewModel) View() string {
 // --------------------------------------------Retro Mainframe View---------------------------------------------
 func (m clusterViewModel) listView() string {
 	w := m.width
-	if w < 40 {
+	if w < 20 {
 		w = 80
 	}
 
-	inner := w - 2 // space between ┃ and ┃
+	inner := w
 	hline := strings.Repeat("━", inner)
 
 	var s string
 
-	header := "  KUBEGRID :: MULTI-CLUSTER OPERATIONS CONSOLE"
+	header := "  KUBEGRID :: MULTI-CLUSTER OPS"
+	if inner >= 50 {
+		header = "  KUBEGRID :: MULTI-CLUSTER OPERATIONS CONSOLE"
+	}
 	s += "┏" + hline + "┓\n"
 	s += fmt.Sprintf("┃%-*s┃\n", inner, header)
 	s += "┣" + hline + "┫\n"
 
-	// Column widths
-	clusterW := 14
-	stateW := 8
+	// Adaptive column widths based on available space
+	stateW := 4 // "UP" / "DOWN"
 	latencyW := 7
-	fixedW := 3 + 1 + clusterW + 1 + stateW + 1 + latencyW + 1
-	contextW := inner - fixedW
-	if contextW < 10 {
-		contextW = 10
+	if inner < 50 {
+		latencyW = 5
 	}
 
-	colHeader := fmt.Sprintf("   CLUSTER        %-*s STATE    LATENCY", contextW, "CONTEXT")
+	// Give cluster and context proportional space from what remains
+	remaining := inner - 3 - 1 - stateW - 1 - latencyW // " > " + gaps
+	if remaining < 10 {
+		remaining = 10
+	}
+	clusterW := remaining * 35 / 100
+	contextW := remaining - clusterW
+	if clusterW < 6 {
+		clusterW = 6
+	}
+	if contextW < 6 {
+		contextW = 6
+	}
+
+	colHeader := fmt.Sprintf("   %-*s %-*s %-*s %-*s",
+		clusterW, "CLUSTER", contextW, "CONTEXT", stateW, "ST", latencyW, "LATENCY")
 	s += fmt.Sprintf("┃%-*s┃\n", inner, colHeader)
 	s += "┣" + hline + "┫\n"
 
@@ -194,15 +247,8 @@ func (m clusterViewModel) listView() string {
 			lat = lat[:latencyW]
 		}
 
-		clusterName := c.Context.FriendlyName
-		contextName := c.Context.Name
-
-		if len(clusterName) > clusterW {
-			clusterName = clusterName[:clusterW]
-		}
-		if len(contextName) > contextW {
-			contextName = contextName[:contextW]
-		}
+		clusterName := truncate(c.Context.FriendlyName, clusterW)
+		contextName := truncate(c.Context.Name, contextW)
 
 		row := fmt.Sprintf(" %s %-*s %-*s %-*s %-*s",
 			cursor,
@@ -220,7 +266,11 @@ func (m clusterViewModel) listView() string {
 	}
 
 	s += "┗" + hline + "┛\n"
-	s += "  ↑↓/jk:Navigate g/G:Top/Bottom Enter:Inspect R:Refresh ?:Help Q:Quit\n"
+	if inner >= 60 {
+		s += "  jk:Nav g/G:Top/Bot Enter:Resources R:Refresh ?:Help Q:Quit\n"
+	} else {
+		s += "  jk:Nav Enter:Open R:Ref ?:Help Q:Quit\n"
+	}
 
 	return s
 }
@@ -236,7 +286,7 @@ func (m clusterViewModel) inspectView() string {
 		w = 50
 	}
 
-	inner := w - 2
+	inner := w
 	if inner < 20 {
 		inner = 20
 	}
