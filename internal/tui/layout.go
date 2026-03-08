@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/mattn/go-runewidth"
 )
 
 type nodeType int
@@ -19,6 +20,7 @@ type layoutNode struct {
 	pane   *pane
 	first  *layoutNode
 	second *layoutNode
+	parent *layoutNode
 }
 
 func newPaneNode(p pane) *layoutNode {
@@ -30,28 +32,62 @@ func splitNode(target *layoutNode, vertical bool) *layoutNode {
 		return target
 	}
 
-	// Create a copy of the current pane
-	old := *target
-	
-	// Transform this node into a split
+	// Clone the existing pane's model for the new sibling
+	oldPane := pane{m: target.pane.m}
+	newPane := pane{m: target.pane.m}
+
+	first := &layoutNode{kind: nodePane, pane: &oldPane, parent: target}
+	second := &layoutNode{kind: nodePane, pane: &newPane, parent: target}
+
 	if vertical {
 		target.kind = nodeSplitV
 	} else {
 		target.kind = nodeSplitH
 	}
-	
-	target.first = &old
-	target.second = newPaneNode(*old.pane)
+
+	target.first = first
+	target.second = second
 	target.pane = nil
-	
-	return target
+
+	return first // return the first child so caller can update activePane
+}
+
+// closePane removes a pane from the tree: its sibling replaces the parent split.
+// Returns the sibling node that took the parent's place.
+func closePane(target *layoutNode) *layoutNode {
+	if target.parent == nil {
+		// root pane, can't close
+		return target
+	}
+
+	parent := target.parent
+	var sibling *layoutNode
+	if parent.first == target {
+		sibling = parent.second
+	} else {
+		sibling = parent.first
+	}
+
+	// Replace parent with sibling
+	parent.kind = sibling.kind
+	parent.pane = sibling.pane
+	parent.first = sibling.first
+	parent.second = sibling.second
+	if parent.first != nil {
+		parent.first.parent = parent
+	}
+	if parent.second != nil {
+		parent.second.parent = parent
+	}
+
+	return parent
 }
 
 var (
 	activeStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color("62"))
-	
+
 	inactiveStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color("240"))
@@ -67,7 +103,7 @@ func (n *layoutNode) render(width, height int, activePane *layoutNode) string {
 		view := n.pane.m.View()
 		lines := strings.Split(view, "\n")
 
-		// Calculate inner dimensions (account for borders)
+		// Calculate inner dimensions (account for borders: 1 char each side)
 		innerWidth := width - 2
 		innerHeight := height - 2
 		if innerWidth < 1 {
@@ -83,15 +119,15 @@ func (n *layoutNode) render(width, height int, activePane *layoutNode) string {
 			if i < len(lines) {
 				line = lines[i]
 			}
-			if len(line) > innerWidth {
-				line = line[:innerWidth]
+			// Use display-width-aware truncation (handles multi-byte box-drawing chars)
+			if runewidth.StringWidth(line) > innerWidth {
+				line = runewidth.Truncate(line, innerWidth, "")
 			}
 			contentLines = append(contentLines, padRight(line, innerWidth))
 		}
 
 		content := strings.Join(contentLines, "\n")
 
-		// Apply border style based on active state
 		style := inactiveStyle
 		if n == activePane {
 			style = activeStyle
@@ -101,7 +137,7 @@ func (n *layoutNode) render(width, height int, activePane *layoutNode) string {
 	}
 
 	if n.kind == nodeSplitV {
-		// Vertical split: side by side
+		// Vertical split: side by side (like tmux Ctrl-b %)
 		w1 := width / 2
 		w2 := width - w1
 
@@ -111,7 +147,7 @@ func (n *layoutNode) render(width, height int, activePane *layoutNode) string {
 		return lipgloss.JoinHorizontal(lipgloss.Top, left, right)
 	}
 
-	// Horizontal split: top and bottom
+	// Horizontal split: top and bottom (like tmux Ctrl-b ")
 	h1 := height / 2
 	h2 := height - h1
 
@@ -121,9 +157,21 @@ func (n *layoutNode) render(width, height int, activePane *layoutNode) string {
 	return lipgloss.JoinVertical(lipgloss.Left, top, bottom)
 }
 
+// firstLeaf returns the deepest first leaf pane in this subtree
+func firstLeaf(n *layoutNode) *layoutNode {
+	if n == nil {
+		return nil
+	}
+	if n.kind == nodePane {
+		return n
+	}
+	return firstLeaf(n.first)
+}
+
 func padRight(s string, w int) string {
-	if len(s) >= w {
+	sw := runewidth.StringWidth(s)
+	if sw >= w {
 		return s
 	}
-	return s + strings.Repeat(" ", w-len(s))
+	return s + strings.Repeat(" ", w-sw)
 }

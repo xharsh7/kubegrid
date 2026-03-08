@@ -24,6 +24,9 @@ func CheckStatus(ctx config.KubeContext) ClusterStatus {
 		return ClusterStatus{Context: ctx, Error: err}
 	}
 
+	// Set timeout so unreachable or auth-broken clusters don't hang
+	restCfg.Timeout = 5 * time.Second
+
 	clientset, err := kubernetes.NewForConfig(restCfg)
 	if err != nil {
 		return ClusterStatus{Context: ctx, Error: err}

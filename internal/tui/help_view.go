@@ -97,8 +97,11 @@ func (h helpModel) View() string {
 	// Window Management
 	s.WriteString(sectionStyle.Render("🪟 WINDOW MANAGEMENT"))
 	s.WriteString("\n")
-	s.WriteString(helpLine("Ctrl+V", "Split pane vertically"))
-	s.WriteString(helpLine("Ctrl+H", "Split pane horizontally"))
+	s.WriteString(helpLine("Ctrl+B", "Split pane vertically (side by side)"))
+	s.WriteString(helpLine("Ctrl+G", "Split pane horizontally (top/bottom)"))
+	s.WriteString(helpLine("Ctrl+X", "Close active pane"))
+	s.WriteString(helpLine("Tab", "Cycle focus to next pane"))
+	s.WriteString(helpLine("Shift+Tab", "Cycle focus to prev pane"))
 	s.WriteString("\n")
 
 	// Commands
@@ -108,7 +111,8 @@ func (h helpModel) View() string {
 	s.WriteString(helpLine(":q or :quit", "Quit application"))
 	s.WriteString(helpLine(":vsplit", "Split vertically"))
 	s.WriteString(helpLine(":hsplit", "Split horizontally"))
-	s.WriteString(helpLine(":help", "Show this help"))
+	s.WriteString(helpLine(":close", "Close active pane"))
+	s.WriteString(helpLine(":help", "Show available commands"))
 	s.WriteString("\n")
 
 	// General
