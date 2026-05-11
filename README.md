@@ -117,8 +117,9 @@ go build -o kubegrid ./cmd/kubegrid
 
 | Key | Action |
 |-----|--------|
-| `Ctrl+V` | Split pane vertically |
-| `Ctrl+H` | Split pane horizontally |
+| `Ctrl+B` or `Ctrl+V` | Split pane vertically (side by side) |
+| `Ctrl+G` or `Ctrl+H` | Split pane horizontally (stacked) |
+| `Ctrl+X` | Close active pane (when more than one) |
 
 ### Command Mode
 
@@ -136,7 +137,7 @@ go build -o kubegrid ./cmd/kubegrid
 ### Monitor Multiple Clusters
 
 1. Launch kubegrid: `./kubegrid`
-2. Press `Ctrl+V` to split vertically
+2. Press `Ctrl+B` or `Ctrl+V` to split vertically
 3. Press `Tab` to switch panes
 4. Press `Enter` on different clusters in each pane
 5. Monitor both simultaneously

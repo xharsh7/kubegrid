@@ -60,6 +60,9 @@ type resourceViewModel struct {
 	wantBack bool
 	width    int
 	height   int
+
+	// Viewport scroll offset for resource list (cursor stays on-screen)
+	listScroll int
 }
 
 type resourceLoadedMsg struct {
@@ -96,6 +99,7 @@ func (m resourceViewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		(&m).ensureListScrollVisible()
 		return m, nil
 
 	case tea.KeyMsg:
@@ -129,7 +133,11 @@ func (m resourceViewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cursor = 0
 
 		case "G":
-			m.cursor = m.getItemCount() - 1
+			if n := m.getItemCount(); n == 0 {
+				m.cursor = 0
+			} else {
+				m.cursor = n - 1
+			}
 
 		case "r":
 			m.loading = true
@@ -160,9 +168,10 @@ func (m resourceViewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.loadResources()
 
 		case "n":
-			// Switch namespace (cycle through available namespaces)
-			if m.resource == resourceNamespaces && m.cursor < len(m.namespaces) {
-				newNs := m.namespaces[m.cursor].Name
+			// Switch namespace (cursor indexes filtered list)
+			nsList := m.getFilteredNamespaces()
+			if m.resource == resourceNamespaces && m.cursor < len(nsList) {
+				newNs := nsList[m.cursor].Name
 				m.client.SetNamespace(newNs)
 				m.namespace = newNs
 				m.resource = resourcePods
@@ -176,16 +185,18 @@ func (m resourceViewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.filterInput = ""
 
 		case "l":
-			// View logs for selected pod
-			if m.resource == resourcePods && m.cursor < len(m.pods) {
-				pod := m.pods[m.cursor]
+			// View logs for selected pod (cursor indexes filtered list)
+			pods := m.getFilteredPods()
+			if m.resource == resourcePods && m.cursor < len(pods) {
+				pod := pods[m.cursor]
 				return m, m.loadPodLogs(pod.Name)
 			}
 
 		case "d":
-			// Delete selected pod
-			if m.resource == resourcePods && m.cursor < len(m.pods) {
-				pod := m.pods[m.cursor]
+			// Delete selected pod (cursor indexes filtered list)
+			pods := m.getFilteredPods()
+			if m.resource == resourcePods && m.cursor < len(pods) {
+				pod := pods[m.cursor]
 				return m, m.deletePod(pod.Name)
 			}
 		}
@@ -199,11 +210,24 @@ func (m resourceViewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.services = msg.services
 			m.namespaces = msg.namespaces
 		}
+		if c := m.getItemCount(); c == 0 {
+			m.cursor = 0
+		} else if m.cursor >= c {
+			m.cursor = c - 1
+		}
 
 	case logsLoadedMsg:
-		m.viewingLogs = true
-		m.logs = msg.logs
-		m.logScroll = 0
+		if msg.err != nil {
+			m.error = msg.err
+			m.viewingLogs = false
+			m.logs = ""
+			m.logScroll = 0
+		} else {
+			m.error = nil
+			m.viewingLogs = true
+			m.logs = msg.logs
+			m.logScroll = 0
+		}
 
 	case podDeletedMsg:
 		if msg.err != nil {
@@ -214,6 +238,7 @@ func (m resourceViewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	(&m).ensureListScrollVisible()
 	return m, nil
 }
 
@@ -229,8 +254,16 @@ func (m resourceViewModel) handleFilterInput(msg tea.KeyMsg) (tea.Model, tea.Cmd
 			m.filterInput = m.filterInput[:len(m.filterInput)-1]
 		}
 	default:
-		m.filterInput += msg.String()
+		if len(msg.Runes) > 0 {
+			m.filterInput += string(msg.Runes)
+		}
 	}
+	if c := m.getItemCount(); c == 0 {
+		m.cursor = 0
+	} else if m.cursor >= c {
+		m.cursor = c - 1
+	}
+	(&m).ensureListScrollVisible()
 	return m, nil
 }
 
@@ -240,6 +273,7 @@ func (m resourceViewModel) handleLogInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.viewingLogs = false
 		m.logs = ""
 		m.logScroll = 0
+		(&m).ensureListScrollVisible()
 	case "up", "k":
 		if m.logScroll > 0 {
 			m.logScroll--
@@ -327,6 +361,43 @@ func (m resourceViewModel) getFilteredNamespaces() []k8s.Namespace {
 		}
 	}
 	return filtered
+}
+
+// listVisibleRows is how many data rows fit under the table header (matches View chrome).
+func (m resourceViewModel) listVisibleRows() int {
+	if m.height <= 0 {
+		return 1
+	}
+	v := m.height - 7 // top (3) + col header + sep (2) + bottom + footer (2)
+	if v < 1 {
+		v = 1
+	}
+	return v
+}
+
+func (m *resourceViewModel) ensureListScrollVisible() {
+	n := m.getItemCount()
+	vr := m.listVisibleRows()
+	if n == 0 {
+		m.listScroll = 0
+		return
+	}
+	maxScroll := n - vr
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	if m.cursor < m.listScroll {
+		m.listScroll = m.cursor
+	}
+	if m.cursor >= m.listScroll+vr {
+		m.listScroll = m.cursor - vr + 1
+	}
+	if m.listScroll < 0 {
+		m.listScroll = 0
+	}
+	if m.listScroll > maxScroll {
+		m.listScroll = maxScroll
+	}
 }
 
 func (m resourceViewModel) loadResources() tea.Cmd {
@@ -506,9 +577,25 @@ func (m resourceViewModel) renderPods() string {
 	s.WriteString("┣" + hline + "┫\n")
 
 	pods := m.getFilteredPods()
-	for i, pod := range pods {
+	n := len(pods)
+	vr := m.listVisibleRows()
+	start := m.listScroll
+	if start < 0 {
+		start = 0
+	}
+	if n > 0 && start > n-1 {
+		start = n - 1
+	}
+	end := start + vr
+	if end > n {
+		end = n
+	}
+
+	linesOut := 0
+	for rowIdx := start; rowIdx < end; rowIdx++ {
+		pod := pods[rowIdx]
 		cursor := " "
-		if i == m.cursor {
+		if rowIdx == m.cursor {
 			cursor = ">"
 		}
 
@@ -528,6 +615,11 @@ func (m resourceViewModel) renderPods() string {
 				cursor, nameW, name, statusW, status, readyW, pod.Ready)
 		}
 		s.WriteString(fmt.Sprintf("┃%-*s┃\n", inner, row))
+		linesOut++
+	}
+	for linesOut < vr {
+		s.WriteString(fmt.Sprintf("┃%-*s┃\n", inner, ""))
+		linesOut++
 	}
 
 	return s.String()
@@ -576,9 +668,25 @@ func (m resourceViewModel) renderDeployments() string {
 	s.WriteString("┣" + hline + "┫\n")
 
 	deployments := m.getFilteredDeployments()
-	for i, dep := range deployments {
+	n := len(deployments)
+	vr := m.listVisibleRows()
+	start := m.listScroll
+	if start < 0 {
+		start = 0
+	}
+	if n > 0 && start > n-1 {
+		start = n - 1
+	}
+	end := start + vr
+	if end > n {
+		end = n
+	}
+
+	linesOut := 0
+	for rowIdx := start; rowIdx < end; rowIdx++ {
+		dep := deployments[rowIdx]
 		cursor := " "
-		if i == m.cursor {
+		if rowIdx == m.cursor {
 			cursor = ">"
 		}
 
@@ -596,6 +704,11 @@ func (m resourceViewModel) renderDeployments() string {
 				cursor, nameW, name, readyW, dep.Ready)
 		}
 		s.WriteString(fmt.Sprintf("┃%-*s┃\n", inner, row))
+		linesOut++
+	}
+	for linesOut < vr {
+		s.WriteString(fmt.Sprintf("┃%-*s┃\n", inner, ""))
+		linesOut++
 	}
 
 	return s.String()
@@ -644,9 +757,25 @@ func (m resourceViewModel) renderServices() string {
 	s.WriteString("┣" + hline + "┫\n")
 
 	services := m.getFilteredServices()
-	for i, svc := range services {
+	n := len(services)
+	vr := m.listVisibleRows()
+	start := m.listScroll
+	if start < 0 {
+		start = 0
+	}
+	if n > 0 && start > n-1 {
+		start = n - 1
+	}
+	end := start + vr
+	if end > n {
+		end = n
+	}
+
+	linesOut := 0
+	for rowIdx := start; rowIdx < end; rowIdx++ {
+		svc := services[rowIdx]
 		cursor := " "
-		if i == m.cursor {
+		if rowIdx == m.cursor {
 			cursor = ">"
 		}
 
@@ -668,6 +797,11 @@ func (m resourceViewModel) renderServices() string {
 				cursor, nameW, name, typeW, svcType)
 		}
 		s.WriteString(fmt.Sprintf("┃%-*s┃\n", inner, row))
+		linesOut++
+	}
+	for linesOut < vr {
+		s.WriteString(fmt.Sprintf("┃%-*s┃\n", inner, ""))
+		linesOut++
 	}
 
 	return s.String()
@@ -708,9 +842,25 @@ func (m resourceViewModel) renderNamespaces() string {
 	s.WriteString("┣" + hline + "┫\n")
 
 	namespaces := m.getFilteredNamespaces()
-	for i, ns := range namespaces {
+	n := len(namespaces)
+	vr := m.listVisibleRows()
+	start := m.listScroll
+	if start < 0 {
+		start = 0
+	}
+	if n > 0 && start > n-1 {
+		start = n - 1
+	}
+	end := start + vr
+	if end > n {
+		end = n
+	}
+
+	linesOut := 0
+	for rowIdx := start; rowIdx < end; rowIdx++ {
+		ns := namespaces[rowIdx]
 		cursor := " "
-		if i == m.cursor {
+		if rowIdx == m.cursor {
 			cursor = ">"
 		}
 
@@ -727,6 +877,11 @@ func (m resourceViewModel) renderNamespaces() string {
 				cursor, nameW, name, statusW, status)
 		}
 		s.WriteString(fmt.Sprintf("┃%-*s┃\n", inner, row))
+		linesOut++
+	}
+	for linesOut < vr {
+		s.WriteString(fmt.Sprintf("┃%-*s┃\n", inner, ""))
+		linesOut++
 	}
 
 	return s.String()
@@ -748,8 +903,9 @@ func (m resourceViewModel) renderLogs() string {
 
 	s.WriteString("┏" + hline + "┓\n")
 
-	if m.cursor < len(m.pods) {
-		title := fmt.Sprintf("  LOGS :: %s", m.pods[m.cursor].Name)
+	pods := m.getFilteredPods()
+	if m.cursor < len(pods) {
+		title := fmt.Sprintf("  LOGS :: %s", pods[m.cursor].Name)
 		if len(title) > inner {
 			title = title[:inner]
 		}

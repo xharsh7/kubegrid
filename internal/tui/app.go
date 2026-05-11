@@ -226,7 +226,9 @@ func (a *appModel) handleCommandMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	default:
-		a.commandInput += msg.String()
+		if len(msg.Runes) > 0 {
+			a.commandInput += string(msg.Runes)
+		}
 	}
 
 	return a, nil

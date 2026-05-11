@@ -65,6 +65,7 @@ func (m clusterViewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		(&m).ensureCursorVisible()
 		return m, nil
 
 	case tea.KeyMsg:
@@ -111,6 +112,12 @@ func (m clusterViewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "r":
 			m.clusters = m.refresh()
+			if len(m.clusters) == 0 {
+				m.cursor = 0
+			} else if m.cursor >= len(m.clusters) {
+				m.cursor = len(m.clusters) - 1
+			}
+			(&m).ensureCursorVisible()
 
 		case "enter":
 			if m.cursor < len(m.clusters) {
@@ -206,20 +213,14 @@ func (m clusterViewModel) listView() string {
 		visibleRows = 1
 	}
 
-	// Clamp scroll so cursor is always visible
+	// Viewport uses m.scroll; ensureCursorVisible keeps it aligned with the cursor.
 	scroll := m.scroll
-	if m.cursor < scroll {
-		scroll = m.cursor
-	}
-	if m.cursor >= scroll+visibleRows {
-		scroll = m.cursor - visibleRows + 1
-	}
-	if scroll < 0 {
-		scroll = 0
-	}
 	maxScroll := len(m.clusters) - visibleRows
 	if maxScroll < 0 {
 		maxScroll = 0
+	}
+	if scroll < 0 {
+		scroll = 0
 	}
 	if scroll > maxScroll {
 		scroll = maxScroll
@@ -338,6 +339,10 @@ func (m *clusterViewModel) ensureCursorVisible() {
 	if visibleRows < 1 {
 		visibleRows = 1
 	}
+	maxScroll := len(m.clusters) - visibleRows
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
 	if m.cursor < m.scroll {
 		m.scroll = m.cursor
 	}
@@ -346,5 +351,8 @@ func (m *clusterViewModel) ensureCursorVisible() {
 	}
 	if m.scroll < 0 {
 		m.scroll = 0
+	}
+	if m.scroll > maxScroll {
+		m.scroll = maxScroll
 	}
 }
