@@ -223,16 +223,6 @@ func (c *Client) GetPodLogs(ctx context.Context, podName string, tailLines int64
 	return string(logs), nil
 }
 
-// GetPodLogsStream streams logs from a pod
-func (c *Client) GetPodLogsStream(ctx context.Context, podName string, follow bool) (io.ReadCloser, error) {
-	opts := &corev1.PodLogOptions{
-		Follow: follow,
-	}
-
-	req := c.clientset.CoreV1().Pods(c.namespace).GetLogs(podName, opts)
-	return req.Stream(ctx)
-}
-
 // DeletePod deletes a pod
 func (c *Client) DeletePod(ctx context.Context, podName string) error {
 	return c.clientset.CoreV1().Pods(c.namespace).Delete(ctx, podName, metav1.DeleteOptions{})

@@ -1,5 +1,5 @@
 # Binaries
-kubegrid
+/kubegrid
 kubegrid-*
 *.exe
 *.dll

@@ -151,7 +151,6 @@ func (a *appModel) broadcastSize(msg tea.WindowSizeMsg) {
 			p.pane.m = m
 		}
 	}
-	_ = cols
 }
 
 // estimatePaneDimensions returns approximate (width, height) for a single pane

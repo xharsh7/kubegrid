@@ -6,17 +6,19 @@ BINARY_NAME=kubegrid
 BINARY_PATH=./$(BINARY_NAME)
 MAIN_PATH=./cmd/kubegrid
 INSTALL_PATH=$(HOME)/.local/bin
+VERSION ?= dev
+LDFLAGS = -ldflags="-s -w -X main.version=$(VERSION)"
 
 # Build the application
 build:
 	@echo "Building $(BINARY_NAME)..."
-	@go build -o $(BINARY_PATH) $(MAIN_PATH)
+	@go build -ldflags="-X main.version=$(VERSION)" -o $(BINARY_PATH) $(MAIN_PATH)
 	@echo "Build complete: $(BINARY_PATH)"
 
 # Build with optimizations for production
 build-prod:
 	@echo "Building $(BINARY_NAME) for production..."
-	@go build -ldflags="-s -w" -o $(BINARY_PATH) $(MAIN_PATH)
+	@go build $(LDFLAGS) -o $(BINARY_PATH) $(MAIN_PATH)
 	@echo "Production build complete: $(BINARY_PATH)"
 
 # Clean build artifacts

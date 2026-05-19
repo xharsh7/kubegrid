@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -12,6 +13,8 @@ import (
 	"github.com/xharsh7/kubegrid/internal/config"
 	"github.com/xharsh7/kubegrid/internal/tui"
 )
+
+var version = "dev"
 
 func init() {
 	// Suppress k8s client-go logging to prevent TUI corruption
@@ -26,6 +29,14 @@ func init() {
 }
 
 func main() {
+	showVersion := flag.Bool("version", false, "Print version and exit")
+	flag.Parse()
+
+	if *showVersion {
+		fmt.Printf("kubegrid %s\n", version)
+		os.Exit(0)
+	}
+
 	paths, err := config.DiscoverKubeconfigs()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error discovering kubeconfigs: %v\n", err)
