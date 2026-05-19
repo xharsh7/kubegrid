@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"strings"
@@ -18,6 +19,8 @@ const (
 	resourceDeployments
 	resourceServices
 	resourceNamespaces
+	resourceEvents
+	resourceCRDs
 )
 
 func (r resourceType) String() string {
@@ -30,6 +33,10 @@ func (r resourceType) String() string {
 		return "Services"
 	case resourceNamespaces:
 		return "Namespaces"
+	case resourceEvents:
+		return "Events"
+	case resourceCRDs:
+		return "CRDs"
 	default:
 		return "Unknown"
 	}
@@ -51,17 +58,35 @@ type resourceViewModel struct {
 	deployments []k8s.Deployment
 	services    []k8s.Service
 	namespaces  []k8s.Namespace
+	events      []k8s.Event
+	crds        []k8s.CRDInfo
+	crdCursor   int
+	crdScroll   int
+	selectedCRD *k8s.CRDInfo
+	crdInstances []k8s.CRDInstance
 
 	// Log viewing
 	viewingLogs bool
 	logs        string
 	logScroll   int
+	logFollow   bool
+	logFollowChan chan logLineMsg
+	logFollowCancel context.CancelFunc
+	logTimestamps bool
+	logContainer  string
+	containers    []string
+	showContainerPicker bool
+	containerCursor int
+	tailLines     int64
+
+	// Describe view
+	viewingDescribe bool
+	describeContent string
 
 	wantBack bool
 	width    int
 	height   int
 
-	// Viewport scroll offset for resource list (cursor stays on-screen)
 	listScroll int
 }
 
@@ -72,6 +97,46 @@ type resourceLoadedMsg struct {
 	services     []k8s.Service
 	namespaces   []k8s.Namespace
 	err          error
+}
+
+type logLineMsg struct {
+	line string
+	done bool
+	err  error
+}
+
+type logsLoadedMsg struct {
+	logs string
+	err  error
+}
+
+type eventsLoadedMsg struct {
+	events []k8s.Event
+	err    error
+}
+
+type crdsLoadedMsg struct {
+	crds []k8s.CRDInfo
+	err  error
+}
+
+type crdInstancesLoadedMsg struct {
+	instances []k8s.CRDInstance
+	err       error
+}
+
+type describeLoadedMsg struct {
+	content string
+	err     error
+}
+
+type containersLoadedMsg struct {
+	containers []string
+	err        error
+}
+
+type podDeletedMsg struct {
+	err error
 }
 
 func NewResourceView(ctx config.KubeContext, namespace string) (resourceViewModel, error) {
@@ -85,6 +150,7 @@ func NewResourceView(ctx config.KubeContext, namespace string) (resourceViewMode
 		client:    client,
 		resource:  resourcePods,
 		namespace: namespace,
+		tailLines: 100,
 	}
 
 	return m, nil
@@ -107,6 +173,14 @@ func (m resourceViewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleFilterInput(msg)
 		}
 
+		if m.viewingDescribe {
+			return m.handleDescribeInput(msg)
+		}
+
+		if m.showContainerPicker {
+			return m.handleContainerPickerInput(msg)
+		}
+
 		if m.viewingLogs {
 			return m.handleLogInput(msg)
 		}
@@ -119,24 +193,68 @@ func (m resourceViewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 
 		case "up", "k":
-			if m.cursor > 0 {
-				m.cursor--
+			if m.selectedCRD != nil {
+				if m.crdCursor > 0 {
+					m.crdCursor--
+				}
+			} else if m.resource == resourceCRDs {
+				if m.crdCursor > 0 {
+					m.crdCursor--
+				}
+			} else {
+				if m.cursor > 0 {
+					m.cursor--
+				}
 			}
 
 		case "down", "j":
-			max := m.getItemCount() - 1
-			if m.cursor < max {
-				m.cursor++
+			if m.selectedCRD != nil {
+				max := len(m.crdInstances) - 1
+				if m.crdCursor < max {
+					m.crdCursor++
+				}
+			} else if m.resource == resourceCRDs {
+				max := len(m.crds) - 1
+				if m.crdCursor < max {
+					m.crdCursor++
+				}
+			} else {
+				max := m.getItemCount() - 1
+				if m.cursor < max {
+					m.cursor++
+				}
 			}
 
 		case "g":
-			m.cursor = 0
+			if m.selectedCRD != nil {
+				m.crdCursor = 0
+			} else if m.resource == resourceCRDs {
+				m.crdCursor = 0
+			} else {
+				m.cursor = 0
+			}
 
 		case "G":
-			if n := m.getItemCount(); n == 0 {
-				m.cursor = 0
+			if m.selectedCRD != nil {
+				n := len(m.crdInstances)
+				if n == 0 {
+					m.crdCursor = 0
+				} else {
+					m.crdCursor = n - 1
+				}
+			} else if m.resource == resourceCRDs {
+				n := len(m.crds)
+				if n == 0 {
+					m.crdCursor = 0
+				} else {
+					m.crdCursor = n - 1
+				}
 			} else {
-				m.cursor = n - 1
+				if n := m.getItemCount(); n == 0 {
+					m.cursor = 0
+				} else {
+					m.cursor = n - 1
+				}
 			}
 
 		case "r":
@@ -144,31 +262,49 @@ func (m resourceViewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.loadResources()
 
 		case "1":
+			m.selectedCRD = nil
 			m.resource = resourcePods
 			m.cursor = 0
 			m.loading = true
 			return m, m.loadResources()
 
 		case "2":
+			m.selectedCRD = nil
 			m.resource = resourceDeployments
 			m.cursor = 0
 			m.loading = true
 			return m, m.loadResources()
 
 		case "3":
+			m.selectedCRD = nil
 			m.resource = resourceServices
 			m.cursor = 0
 			m.loading = true
 			return m, m.loadResources()
 
 		case "4":
+			m.selectedCRD = nil
 			m.resource = resourceNamespaces
 			m.cursor = 0
 			m.loading = true
 			return m, m.loadResources()
 
+		case "5":
+			m.selectedCRD = nil
+			m.resource = resourceEvents
+			m.cursor = 0
+			m.loading = true
+			return m, m.loadResources()
+
+		case "6":
+			m.selectedCRD = nil
+			m.resource = resourceCRDs
+			m.cursor = 0
+			m.crdCursor = 0
+			m.loading = true
+			return m, m.loadResources()
+
 		case "n":
-			// Switch namespace (cursor indexes filtered list)
 			nsList := m.getFilteredNamespaces()
 			if m.resource == resourceNamespaces && m.cursor < len(nsList) {
 				newNs := nsList[m.cursor].Name
@@ -184,16 +320,45 @@ func (m resourceViewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.filtering = true
 			m.filterInput = ""
 
+		case "enter":
+			if m.resource == resourceCRDs && m.crdCursor < len(m.crds) {
+				crd := m.crds[m.crdCursor]
+				m.selectedCRD = &crd
+				m.crdCursor = 0
+				m.loading = true
+				return m, m.loadCRDInstances(crd)
+			}
+
 		case "l":
-			// View logs for selected pod (cursor indexes filtered list)
 			pods := m.getFilteredPods()
 			if m.resource == resourcePods && m.cursor < len(pods) {
 				pod := pods[m.cursor]
-				return m, m.loadPodLogs(pod.Name)
+				m.loading = true
+				return m, m.loadContainers(pod.Name)
+			}
+
+		case "y":
+			if m.resource == resourcePods {
+				pods := m.getFilteredPods()
+				if m.cursor < len(pods) {
+					m.loading = true
+					return m, m.loadDescribe("pods", pods[m.cursor].Name)
+				}
+			} else if m.resource == resourceDeployments {
+				deps := m.getFilteredDeployments()
+				if m.cursor < len(deps) {
+					m.loading = true
+					return m, m.loadDescribe("deployments", deps[m.cursor].Name)
+				}
+			} else if m.resource == resourceServices {
+				svcs := m.getFilteredServices()
+				if m.cursor < len(svcs) {
+					m.loading = true
+					return m, m.loadDescribe("services", svcs[m.cursor].Name)
+				}
 			}
 
 		case "d":
-			// Delete selected pod (cursor indexes filtered list)
 			pods := m.getFilteredPods()
 			if m.resource == resourcePods && m.cursor < len(pods) {
 				pod := pods[m.cursor]
@@ -210,10 +375,63 @@ func (m resourceViewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.services = msg.services
 			m.namespaces = msg.namespaces
 		}
-		if c := m.getItemCount(); c == 0 {
-			m.cursor = 0
-		} else if m.cursor >= c {
-			m.cursor = c - 1
+		m.adjustCursor()
+
+	case eventsLoadedMsg:
+		m.loading = false
+		m.error = msg.err
+		if msg.err == nil {
+			m.events = msg.events
+		}
+		m.adjustCursor()
+
+	case crdsLoadedMsg:
+		m.loading = false
+		m.error = msg.err
+		if msg.err == nil {
+			m.crds = msg.crds
+		}
+		if len(m.crds) == 0 {
+			m.crdCursor = 0
+		} else if m.crdCursor >= len(m.crds) {
+			m.crdCursor = len(m.crds) - 1
+		}
+
+	case crdInstancesLoadedMsg:
+		m.loading = false
+		m.error = msg.err
+		if msg.err == nil {
+			m.crdInstances = msg.instances
+		}
+		if len(m.crdInstances) == 0 {
+			m.crdCursor = 0
+		} else if m.crdCursor >= len(m.crdInstances) {
+			m.crdCursor = len(m.crdInstances) - 1
+		}
+
+	case describeLoadedMsg:
+		m.loading = false
+		if msg.err != nil {
+			m.error = msg.err
+			m.viewingDescribe = false
+		} else {
+			m.error = nil
+			m.viewingDescribe = true
+			m.describeContent = msg.content
+		}
+
+	case containersLoadedMsg:
+		m.loading = false
+		if msg.err != nil {
+			m.error = msg.err
+		} else {
+			m.containers = msg.containers
+			if len(msg.containers) == 1 {
+				m.logContainer = msg.containers[0]
+				return m, m.loadPodLogs()
+			}
+			m.showContainerPicker = true
+			m.containerCursor = 0
 		}
 
 	case logsLoadedMsg:
@@ -229,6 +447,28 @@ func (m resourceViewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.logScroll = 0
 		}
 
+	case logLineMsg:
+		if msg.err != nil {
+			m.logFollow = false
+			m.error = msg.err
+			return m, nil
+		}
+		if msg.done {
+			m.logFollow = false
+			return m, nil
+		}
+		m.logs += msg.line + "\n"
+		// Auto-scroll to bottom
+		lines := strings.Split(m.logs, "\n")
+		maxVisible := m.height - 5
+		if maxVisible < 3 {
+			maxVisible = 3
+		}
+		if len(lines) > maxVisible {
+			m.logScroll = len(lines) - maxVisible
+		}
+		return m, m.waitForLogLine()
+
 	case podDeletedMsg:
 		if msg.err != nil {
 			m.error = msg.err
@@ -240,6 +480,14 @@ func (m resourceViewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	(&m).ensureListScrollVisible()
 	return m, nil
+}
+
+func (m resourceViewModel) adjustCursor() {
+	if c := m.getItemCount(); c == 0 {
+		m.cursor = 0
+	} else if m.cursor >= c {
+		m.cursor = c - 1
+	}
 }
 
 func (m resourceViewModel) handleFilterInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -270,28 +518,86 @@ func (m resourceViewModel) handleFilterInput(msg tea.KeyMsg) (tea.Model, tea.Cmd
 func (m resourceViewModel) handleLogInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "q", "esc":
+		if m.logFollow {
+			if m.logFollowCancel != nil {
+				m.logFollowCancel()
+			}
+			m.logFollow = false
+		}
 		m.viewingLogs = false
 		m.logs = ""
 		m.logScroll = 0
 		(&m).ensureListScrollVisible()
+
+	case "f":
+		if !m.logFollow {
+			pods := m.getFilteredPods()
+			if m.cursor < len(pods) {
+				m.logFollow = true
+				m.logs = ""
+				m.loading = true
+				return m, m.startLogFollow(pods[m.cursor].Name)
+			}
+		}
+
+	case "t":
+		m.logTimestamps = !m.logTimestamps
+
 	case "up", "k":
-		if m.logScroll > 0 {
-			m.logScroll--
+		if !m.logFollow {
+			if m.logScroll > 0 {
+				m.logScroll--
+			}
+		}
+
+	case "down", "j":
+		if !m.logFollow {
+			lines := strings.Split(m.logs, "\n")
+			maxVisible := m.height - 5
+			if maxVisible < 3 {
+				maxVisible = 3
+			}
+			maxScroll := len(lines) - maxVisible
+			if maxScroll < 0 {
+				maxScroll = 0
+			}
+			if m.logScroll < maxScroll {
+				m.logScroll++
+			}
+		}
+	}
+	return m, nil
+}
+
+func (m resourceViewModel) handleContainerPickerInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.showContainerPicker = false
+		m.containers = nil
+	case "enter":
+		if m.containerCursor >= 0 && m.containerCursor < len(m.containers) {
+			m.logContainer = m.containers[m.containerCursor]
+			m.showContainerPicker = false
+			m.containers = nil
+			return m, m.loadPodLogs()
+		}
+	case "up", "k":
+		if m.containerCursor > 0 {
+			m.containerCursor--
 		}
 	case "down", "j":
-		// Clamp scroll to max
-		lines := strings.Split(m.logs, "\n")
-		maxVisible := m.height - 6
-		if maxVisible < 5 {
-			maxVisible = 5
+		if m.containerCursor < len(m.containers)-1 {
+			m.containerCursor++
 		}
-		maxScroll := len(lines) - maxVisible
-		if maxScroll < 0 {
-			maxScroll = 0
-		}
-		if m.logScroll < maxScroll {
-			m.logScroll++
-		}
+	}
+	return m, nil
+}
+
+func (m resourceViewModel) handleDescribeInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "q", "esc":
+		m.viewingDescribe = false
+		m.describeContent = ""
 	}
 	return m, nil
 }
@@ -306,6 +612,13 @@ func (m resourceViewModel) getItemCount() int {
 		return len(m.getFilteredServices())
 	case resourceNamespaces:
 		return len(m.getFilteredNamespaces())
+	case resourceEvents:
+		return len(m.events)
+	case resourceCRDs:
+		if m.selectedCRD != nil {
+			return len(m.crdInstances)
+		}
+		return len(m.crds)
 	default:
 		return 0
 	}
@@ -363,12 +676,11 @@ func (m resourceViewModel) getFilteredNamespaces() []k8s.Namespace {
 	return filtered
 }
 
-// listVisibleRows is how many data rows fit under the table header (matches View chrome).
 func (m resourceViewModel) listVisibleRows() int {
 	if m.height <= 0 {
 		return 1
 	}
-	v := m.height - 7 // top (3) + col header + sep (2) + bottom + footer (2)
+	v := m.height - 7
 	if v < 1 {
 		v = 1
 	}
@@ -405,51 +717,117 @@ func (m resourceViewModel) loadResources() tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
-		var pods []k8s.Pod
-		var deployments []k8s.Deployment
-		var services []k8s.Service
-		var namespaces []k8s.Namespace
-		var err error
-
 		switch m.resource {
 		case resourcePods:
-			pods, err = m.client.ListPods(ctx)
+			pods, err := m.client.ListPods(ctx)
+			return resourceLoadedMsg{resourceType: m.resource, pods: pods, err: err}
 		case resourceDeployments:
-			deployments, err = m.client.ListDeployments(ctx)
+			deps, err := m.client.ListDeployments(ctx)
+			return resourceLoadedMsg{resourceType: m.resource, deployments: deps, err: err}
 		case resourceServices:
-			services, err = m.client.ListServices(ctx)
+			svcs, err := m.client.ListServices(ctx)
+			return resourceLoadedMsg{resourceType: m.resource, services: svcs, err: err}
 		case resourceNamespaces:
-			namespaces, err = m.client.ListNamespaces(ctx)
+			ns, err := m.client.ListNamespaces(ctx)
+			return resourceLoadedMsg{resourceType: m.resource, namespaces: ns, err: err}
+		case resourceEvents:
+			events, err := m.client.ListEvents(ctx)
+			return eventsLoadedMsg{events: events, err: err}
+		case resourceCRDs:
+			crds, err := m.client.ListCRDs(ctx)
+			return crdsLoadedMsg{crds: crds, err: err}
 		}
-
-		return resourceLoadedMsg{
-			resourceType: m.resource,
-			pods:         pods,
-			deployments:  deployments,
-			services:     services,
-			namespaces:   namespaces,
-			err:          err,
-		}
+		return nil
 	}
 }
 
-type logsLoadedMsg struct {
-	logs string
-	err  error
-}
-
-func (m resourceViewModel) loadPodLogs(podName string) tea.Cmd {
+func (m resourceViewModel) loadCRDInstances(crd k8s.CRDInfo) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
-		logs, err := m.client.GetPodLogs(ctx, podName, 100)
+		instances, err := m.client.ListCRDInstances(ctx, crd)
+		return crdInstancesLoadedMsg{instances: instances, err: err}
+	}
+}
+
+func (m resourceViewModel) loadDescribe(resource, name string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		gvr, err := k8s.GVRForResource(resource)
+		if err != nil {
+			return describeLoadedMsg{err: err}
+		}
+
+		yaml, err := m.client.GetResourceYAML(ctx, gvr, name)
+		return describeLoadedMsg{content: yaml, err: err}
+	}
+}
+
+func (m resourceViewModel) loadContainers(podName string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		containers, err := m.client.GetPodContainers(ctx, podName)
+		return containersLoadedMsg{containers: containers, err: err}
+	}
+}
+
+func (m resourceViewModel) loadPodLogs() tea.Cmd {
+	pods := m.getFilteredPods()
+	if m.cursor >= len(pods) {
+		return nil
+	}
+
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		logs, err := m.client.GetPodLogs(ctx, pods[m.cursor].Name, m.tailLines)
 		return logsLoadedMsg{logs: logs, err: err}
 	}
 }
 
-type podDeletedMsg struct {
-	err error
+func (m resourceViewModel) startLogFollow(podName string) tea.Cmd {
+	ctx, cancel := context.WithCancel(context.Background())
+	m.logFollowCancel = cancel
+	ch := make(chan logLineMsg, 100)
+	m.logFollowChan = ch
+
+	go func() {
+		defer close(ch)
+
+		stream, err := m.client.GetPodLogsStream(ctx, podName, m.logContainer, m.tailLines, m.logTimestamps)
+		if err != nil {
+			ch <- logLineMsg{err: err}
+			return
+		}
+		defer stream.Close()
+
+		scanner := bufio.NewScanner(stream)
+		for scanner.Scan() {
+			select {
+			case ch <- logLineMsg{line: scanner.Text()}:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	return m.waitForLogLine()
+}
+
+func (m resourceViewModel) waitForLogLine() tea.Cmd {
+	return func() tea.Msg {
+		msg, ok := <-m.logFollowChan
+		if !ok {
+			return logLineMsg{done: true}
+		}
+		return msg
+	}
 }
 
 func (m resourceViewModel) deletePod(podName string) tea.Cmd {
@@ -462,9 +840,21 @@ func (m resourceViewModel) deletePod(podName string) tea.Cmd {
 	}
 }
 
+// View renders the current view
 func (m resourceViewModel) View() string {
+	if m.viewingDescribe {
+		return m.renderDescribe()
+	}
+
 	if m.viewingLogs {
+		if m.logFollow {
+			return m.renderLogFollow()
+		}
 		return m.renderLogs()
+	}
+
+	if m.showContainerPicker {
+		return m.renderContainerPicker()
 	}
 
 	w := m.width
@@ -476,7 +866,6 @@ func (m resourceViewModel) View() string {
 
 	var s strings.Builder
 
-	// Header
 	s.WriteString("┏" + hline + "┓\n")
 	title := fmt.Sprintf("  %s [%s] ns:%s",
 		m.context.FriendlyName, m.resource.String(), m.namespace)
@@ -506,7 +895,6 @@ func (m resourceViewModel) View() string {
 		return s.String()
 	}
 
-	// Resource-specific rendering
 	switch m.resource {
 	case resourcePods:
 		s.WriteString(m.renderPods())
@@ -516,17 +904,24 @@ func (m resourceViewModel) View() string {
 		s.WriteString(m.renderServices())
 	case resourceNamespaces:
 		s.WriteString(m.renderNamespaces())
+	case resourceEvents:
+		s.WriteString(m.renderEvents())
+	case resourceCRDs:
+		if m.selectedCRD != nil {
+			s.WriteString(m.renderCRDInstances())
+		} else {
+			s.WriteString(m.renderCRDs())
+		}
 	}
 
-	// Footer
 	s.WriteString("┗" + hline + "┛\n")
 
 	if m.filtering {
 		s.WriteString(fmt.Sprintf("  Filter: %s_\n", m.filterInput))
 	} else if inner >= 60 {
-		s.WriteString("  1:Pods 2:Deploy 3:Svc 4:NS | /:Filter L:Logs D:Del R:Ref N:NS Esc:Back\n")
+		s.WriteString("  1:Pods 2:Dply 3:Svc 4:NS 5:Evnt 6:CRD | /:Flt L:Logs D:Del Y:Desc R:Ref N:NS Esc:Back\n")
 	} else {
-		s.WriteString("  1-4:Res /:Flt L:Log D:Del R:Ref Esc:Back\n")
+		s.WriteString("  1-6:Res /:Flt L:Log D:Del Y:Desc R:Ref Esc:Back\n")
 	}
 
 	return s.String()
@@ -540,7 +935,6 @@ func (m resourceViewModel) renderPods() string {
 	inner := w
 	hline := strings.Repeat("━", inner)
 
-	// Adaptive columns: hide less important ones in narrow panels
 	showRestarts := inner >= 70
 	showAge := inner >= 50
 
@@ -549,7 +943,7 @@ func (m resourceViewModel) renderPods() string {
 	restartsW := 4
 	ageW := 5
 
-	fixed := 4 + statusW + readyW // " > " + status + ready
+	fixed := 4 + statusW + readyW
 	if showRestarts {
 		fixed += 1 + restartsW
 	}
@@ -887,6 +1281,242 @@ func (m resourceViewModel) renderNamespaces() string {
 	return s.String()
 }
 
+func (m resourceViewModel) renderEvents() string {
+	w := m.width
+	if w < 20 {
+		w = 80
+	}
+	inner := w
+	hline := strings.Repeat("━", inner)
+
+	showMsg := inner >= 70
+
+	typeW := 8
+	reasonW := 12
+	objectW := 20
+	ageW := 8
+
+	fixed := 4 + typeW + reasonW + objectW + ageW
+	nameW := inner - fixed
+	if nameW < 8 {
+		nameW = 8
+	}
+
+	var s strings.Builder
+	colHeader := fmt.Sprintf("   %-*s %-*s %-*s %-*s %-*s",
+		ageW, "LAST SEEN", typeW, "TYPE", reasonW, "REASON", objectW, "OBJECT", inner-fixed+nameW, "MESSAGE")
+	s.WriteString(fmt.Sprintf("┃%-*s┃\n", inner, colHeader))
+	s.WriteString("┣" + hline + "┫\n")
+
+	events := m.events
+	n := len(events)
+	vr := m.listVisibleRows()
+	start := m.listScroll
+	if start < 0 {
+		start = 0
+	}
+	if n > 0 && start > n-1 {
+		start = n - 1
+	}
+	end := start + vr
+	if end > n {
+		end = n
+	}
+
+	linesOut := 0
+	for rowIdx := start; rowIdx < end; rowIdx++ {
+		e := events[rowIdx]
+		cursor := " "
+		if rowIdx == m.cursor {
+			cursor = ">"
+		}
+
+		age := k8s.FormatAge(e.LastSeen)
+		etype := truncate(e.Type, typeW)
+		reason := truncate(e.Reason, reasonW)
+		obj := truncate(e.Object, objectW)
+		msg := e.Message
+		if !showMsg && len(msg) > inner-fixed+nameW {
+			msg = msg[:inner-fixed+nameW]
+		} else if showMsg && len(msg) > inner-fixed+nameW {
+			msg = msg[:inner-fixed+nameW]
+		}
+
+		row := fmt.Sprintf(" %s %-*s %-*s %-*s %-*s %-*s",
+			cursor, ageW, age, typeW, etype, reasonW, reason, objectW, obj, inner-fixed+nameW, msg)
+		s.WriteString(fmt.Sprintf("┃%-*s┃\n", inner, row))
+		linesOut++
+	}
+	for linesOut < vr {
+		s.WriteString(fmt.Sprintf("┃%-*s┃\n", inner, ""))
+		linesOut++
+	}
+
+	return s.String()
+}
+
+func (m resourceViewModel) renderCRDs() string {
+	w := m.width
+	if w < 20 {
+		w = 80
+	}
+	inner := w
+	hline := strings.Repeat("━", inner)
+
+	kindW := 16
+	groupW := 20
+	versionW := 8
+	scopeW := 5
+
+	fixed := 4 + kindW + groupW + versionW + scopeW
+	nameW := inner - fixed
+	if nameW < 8 {
+		nameW = 8
+	}
+
+	var s strings.Builder
+	colHeader := fmt.Sprintf("   %-*s %-*s %-*s %-*s %-*s",
+		nameW, "RESOURCE", kindW, "KIND", groupW, "GROUP", versionW, "VERSION", scopeW, "SCOPE")
+	s.WriteString(fmt.Sprintf("┃%-*s┃\n", inner, colHeader))
+	s.WriteString("┣" + hline + "┫\n")
+
+	crds := m.crds
+	n := len(crds)
+	vr := m.listVisibleRows()
+	start := m.listScroll
+	if start < 0 {
+		start = 0
+	}
+	if n > 0 && start > n-1 {
+		start = n - 1
+	}
+	end := start + vr
+	if end > n {
+		end = n
+	}
+
+	linesOut := 0
+	for rowIdx := start; rowIdx < end; rowIdx++ {
+		crd := crds[rowIdx]
+		cursor := " "
+		if rowIdx == m.crdCursor {
+			cursor = ">"
+		}
+
+		rname := truncate(crd.Name, nameW)
+		kind := truncate(crd.Kind, kindW)
+		group := truncate(crd.Group, groupW)
+		version := truncate(crd.Version, versionW)
+		scope := "NS"
+		if !crd.Namespaced {
+			scope = "CL"
+		}
+
+		row := fmt.Sprintf(" %s %-*s %-*s %-*s %-*s %-*s",
+			cursor, nameW, rname, kindW, kind, groupW, group, versionW, version, scopeW, scope)
+		s.WriteString(fmt.Sprintf("┃%-*s┃\n", inner, row))
+		linesOut++
+	}
+	for linesOut < vr {
+		s.WriteString(fmt.Sprintf("┃%-*s┃\n", inner, ""))
+		linesOut++
+	}
+
+	return s.String()
+}
+
+func (m resourceViewModel) renderCRDInstances() string {
+	w := m.width
+	if w < 20 {
+		w = 80
+	}
+	inner := w
+	hline := strings.Repeat("━", inner)
+
+	var s strings.Builder
+	title := fmt.Sprintf("  %s :: %s instances", m.selectedCRD.Kind, m.selectedCRD.Name)
+	s.WriteString(fmt.Sprintf("┃%-*s┃\n", inner, title))
+	s.WriteString("┣" + hline + "┫\n")
+
+	showNamespace := m.selectedCRD.Namespaced
+	showAge := inner >= 40
+
+	ageW := 5
+	fixed := 4
+	nsW := 0
+	if showNamespace {
+		nsW = 16
+		fixed += 1 + nsW
+	}
+	if showAge {
+		fixed += 1 + ageW
+	}
+	nameW := inner - fixed
+	if nameW < 8 {
+		nameW = 8
+	}
+
+	var colHeader string
+	if showNamespace && showAge {
+		colHeader = fmt.Sprintf("   %-*s %-*s %-*s", nameW, "NAME", nsW, "NAMESPACE", ageW, "AGE")
+	} else if showNamespace {
+		colHeader = fmt.Sprintf("   %-*s %-*s", nameW, "NAME", nsW, "NAMESPACE")
+	} else if showAge {
+		colHeader = fmt.Sprintf("   %-*s %-*s", nameW, "NAME", ageW, "AGE")
+	} else {
+		colHeader = fmt.Sprintf("   %-*s", nameW, "NAME")
+	}
+	s.WriteString(fmt.Sprintf("┃%-*s┃\n", inner, colHeader))
+	s.WriteString("┣" + hline + "┫\n")
+
+	instances := m.crdInstances
+	n := len(instances)
+	vr := m.listVisibleRows()
+	start := m.listScroll
+	if start < 0 {
+		start = 0
+	}
+	if n > 0 && start > n-1 {
+		start = n - 1
+	}
+	end := start + vr
+	if end > n {
+		end = n
+	}
+
+	linesOut := 0
+	for rowIdx := start; rowIdx < end; rowIdx++ {
+		inst := instances[rowIdx]
+		cursor := " "
+		if rowIdx == m.crdCursor {
+			cursor = ">"
+		}
+
+		name := truncate(inst.Name, nameW)
+		ns := truncate(inst.Namespace, nsW)
+		age := truncate(k8s.FormatAge(inst.Age), ageW)
+
+		var row string
+		if showNamespace && showAge {
+			row = fmt.Sprintf(" %s %-*s %-*s %-*s", cursor, nameW, name, nsW, ns, ageW, age)
+		} else if showNamespace {
+			row = fmt.Sprintf(" %s %-*s %-*s", cursor, nameW, name, nsW, ns)
+		} else if showAge {
+			row = fmt.Sprintf(" %s %-*s %-*s", cursor, nameW, name, ageW, age)
+		} else {
+			row = fmt.Sprintf(" %s %-*s", cursor, nameW, name)
+		}
+		s.WriteString(fmt.Sprintf("┃%-*s┃\n", inner, row))
+		linesOut++
+	}
+	for linesOut < vr {
+		s.WriteString(fmt.Sprintf("┃%-*s┃\n", inner, ""))
+		linesOut++
+	}
+
+	return s.String()
+}
+
 func (m resourceViewModel) renderLogs() string {
 	w := m.width
 	if w < 20 {
@@ -894,34 +1524,37 @@ func (m resourceViewModel) renderLogs() string {
 	}
 	inner := w
 	hline := strings.Repeat("━", inner)
-	contentW := inner - 2 // space for " " padding on each side
+	contentW := inner - 2
 	if contentW < 1 {
 		contentW = 1
 	}
 
 	var s strings.Builder
-
 	s.WriteString("┏" + hline + "┓\n")
 
 	pods := m.getFilteredPods()
 	if m.cursor < len(pods) {
-		title := fmt.Sprintf("  LOGS :: %s", pods[m.cursor].Name)
+		pod := pods[m.cursor]
+		title := fmt.Sprintf("  LOGS :: %s", pod.Name)
+		if m.logContainer != "" {
+			title += fmt.Sprintf(" [%s]", m.logContainer)
+		}
+		if m.logTimestamps {
+			title += " [timestamps]"
+		}
 		if len(title) > inner {
 			title = title[:inner]
 		}
 		s.WriteString(fmt.Sprintf("┃%-*s┃\n", inner, title))
 	}
-
 	s.WriteString("┣" + hline + "┫\n")
 
 	lines := strings.Split(m.logs, "\n")
-	// chrome: top border + title + separator + bottom border + footer = 5 lines
 	maxLines := m.height - 5
 	if maxLines < 3 {
 		maxLines = 3
 	}
 
-	// Clamp scroll
 	maxScroll := len(lines) - maxLines
 	if maxScroll < 0 {
 		maxScroll = 0
@@ -936,7 +1569,6 @@ func (m resourceViewModel) renderLogs() string {
 		s.WriteString(fmt.Sprintf("┃ %-*s ┃\n", contentW, line))
 	}
 
-	// Pad if fewer lines than maxLines
 	shown := len(lines) - start
 	if shown > maxLines {
 		shown = maxLines
@@ -946,7 +1578,125 @@ func (m resourceViewModel) renderLogs() string {
 	}
 
 	s.WriteString("┗" + hline + "┛\n")
-	s.WriteString("  ↑↓:Scroll  Esc:Back\n")
+	s.WriteString("  ↑↓:Scroll F:Follow T:Timestamps Esc:Back\n")
+
+	return s.String()
+}
+
+func (m resourceViewModel) renderLogFollow() string {
+	w := m.width
+	if w < 20 {
+		w = 80
+	}
+	inner := w
+	hline := strings.Repeat("━", inner)
+	contentW := inner - 2
+	if contentW < 1 {
+		contentW = 1
+	}
+
+	var s strings.Builder
+	s.WriteString("┏" + hline + "┓\n")
+
+	title := "  LOGS :: FOLLOWING"
+	if m.logContainer != "" {
+		title += fmt.Sprintf(" [%s]", m.logContainer)
+	}
+	if m.logTimestamps {
+		title += " [timestamps]"
+	}
+	if len(title) > inner {
+		title = title[:inner]
+	}
+	s.WriteString(fmt.Sprintf("┃%-*s┃\n", inner, title))
+	s.WriteString("┣" + hline + "┫\n")
+
+	lines := strings.Split(m.logs, "\n")
+	maxLines := m.height - 5
+	if maxLines < 3 {
+		maxLines = 3
+	}
+
+	start := len(lines) - maxLines
+	if start < 0 {
+		start = 0
+	}
+
+	for i := start; i < start+maxLines && i < len(lines); i++ {
+		line := truncate(lines[i], contentW)
+		s.WriteString(fmt.Sprintf("┃ %-*s ┃\n", contentW, line))
+	}
+
+	s.WriteString("┗" + hline + "┛\n")
+	s.WriteString("  Esc:Stop Follow\n")
+
+	return s.String()
+}
+
+func (m resourceViewModel) renderDescribe() string {
+	w := m.width
+	if w < 20 {
+		w = 80
+	}
+	inner := w
+	hline := strings.Repeat("━", inner)
+	contentW := inner - 2
+	if contentW < 1 {
+		contentW = 1
+	}
+
+	var s strings.Builder
+	s.WriteString("┏" + hline + "┓\n")
+	s.WriteString(fmt.Sprintf("┃%-*s┃\n", inner, "  RESOURCE YAML"))
+	s.WriteString("┣" + hline + "┫\n")
+
+	lines := strings.Split(m.describeContent, "\n")
+	maxLines := m.height - 4
+	if maxLines < 3 {
+		maxLines = 3
+	}
+
+	for i := 0; i < maxLines && i < len(lines); i++ {
+		line := truncate(lines[i], contentW)
+		s.WriteString(fmt.Sprintf("┃ %-*s ┃\n", contentW, line))
+	}
+
+	s.WriteString("┗" + hline + "┛\n")
+	s.WriteString("  Esc:Back\n")
+
+	return s.String()
+}
+
+func (m resourceViewModel) renderContainerPicker() string {
+	w := m.width
+	if w < 20 {
+		w = 80
+	}
+	inner := w
+	hline := strings.Repeat("━", inner)
+
+	var s strings.Builder
+	s.WriteString("┏" + hline + "┓\n")
+	s.WriteString(fmt.Sprintf("┃%-*s┃\n", inner, "  SELECT CONTAINER"))
+	s.WriteString("┣" + hline + "┫\n")
+
+	nameW := inner - 4
+	if nameW < 1 {
+		nameW = 1
+	}
+
+	for i, container := range m.containers {
+		cursor := " "
+		if i == m.containerCursor {
+			cursor = ">"
+		}
+		name := truncate(container, nameW)
+		row := fmt.Sprintf(" %s %-*s", cursor, nameW, name)
+		s.WriteString(fmt.Sprintf("┃%-*s┃\n", inner, row))
+	}
+
+	s.WriteString("┗" + hline + "┛\n")
+	s.WriteString("  ↑↓:Nav Enter:Select Esc:Cancel\n")
 
 	return s.String()
 }

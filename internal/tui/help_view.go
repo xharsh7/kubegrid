@@ -80,7 +80,9 @@ func (h helpModel) View() string {
 	s.WriteString(helpLine("2", "View Deployments"))
 	s.WriteString(helpLine("3", "View Services"))
 	s.WriteString(helpLine("4", "View Namespaces"))
-	s.WriteString(helpLine("Enter", "Inspect selected cluster/resource"))
+	s.WriteString(helpLine("5", "View Events"))
+	s.WriteString(helpLine("6", "View Custom Resources (CRDs)"))
+	s.WriteString(helpLine("Enter", "Inspect selected cluster / CRD instances"))
 	s.WriteString(helpLine("Esc", "Go back to list view"))
 	s.WriteString("\n")
 
@@ -88,10 +90,21 @@ func (h helpModel) View() string {
 	s.WriteString(sectionStyle.Render("⚡ ACTIONS"))
 	s.WriteString("\n")
 	s.WriteString(helpLine("r", "Refresh current view"))
-	s.WriteString(helpLine("l", "View logs (when pod selected)"))
+	s.WriteString(helpLine("l", "View pod logs (select container if multi-container)"))
+	s.WriteString(helpLine("y", "View resource YAML / describe"))
 	s.WriteString(helpLine("d", "Delete selected pod"))
 	s.WriteString(helpLine("n", "Switch namespace (from namespace list)"))
 	s.WriteString(helpLine("/", "Filter/search resources"))
+	s.WriteString("\n")
+
+	// Log Viewing
+	s.WriteString(sectionStyle.Render("📜 LOG VIEWING"))
+	s.WriteString("\n")
+	s.WriteString(helpLine("f", "Start/stop log follow mode (streaming)"))
+	s.WriteString(helpLine("t", "Toggle timestamps"))
+	s.WriteString(helpLine("↑/k", "Scroll up"))
+	s.WriteString(helpLine("↓/j", "Scroll down"))
+	s.WriteString(helpLine("Esc", "Close log view"))
 	s.WriteString("\n")
 
 	// Window Management
@@ -132,7 +145,11 @@ func (h helpModel) View() string {
 	s.WriteString("\n")
 	s.WriteString(descStyle.Render("  • Switch namespaces: press 4 → navigate → press n"))
 	s.WriteString("\n")
-	s.WriteString(descStyle.Render("  • Logs auto-refresh with r while viewing"))
+	s.WriteString(descStyle.Render("  • Press l on a pod to view logs; press f to follow"))
+	s.WriteString("\n")
+	s.WriteString(descStyle.Render("  • Press y on a resource to view its YAML describe"))
+	s.WriteString("\n")
+	s.WriteString(descStyle.Render("  • Press 6 to browse Custom Resources (CRDs)"))
 	s.WriteString("\n\n")
 
 	s.WriteString(descStyle.Render("Press any key to close help..."))
