@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/xharsh7/kubegrid/internal/cluster"
@@ -243,10 +244,7 @@ func (m clusterViewModel) listView() string {
 			state = "UP"
 		}
 
-		lat := c.Latency.String()
-		if len(lat) > latencyW {
-			lat = lat[:latencyW]
-		}
+		lat := formatLatency(c.Latency)
 
 		clusterName := truncate(c.Context.FriendlyName, clusterW)
 		contextName := truncate(c.Context.Name, contextW)
@@ -317,7 +315,7 @@ func (m clusterViewModel) inspectView() string {
 
 	s += line("Status:", status)
 	s += line("Context:", c.Context.Name)
-	s += line("Latency:", c.Latency.String())
+	s += line("Latency:", formatLatency(c.Latency))
 
 	if c.Error != nil {
 		errMsg := c.Error.Error()
@@ -331,6 +329,18 @@ func (m clusterViewModel) inspectView() string {
 	s += "  Esc/Q:Back   R:Refresh\n"
 
 	return s
+}
+
+// formatLatency formats a duration as integer milliseconds for display
+func formatLatency(d time.Duration) string {
+	ms := d.Milliseconds()
+	if ms < 1 && d > 0 {
+		return "<1ms"
+	}
+	if ms < 1000 {
+		return fmt.Sprintf("%dms", ms)
+	}
+	return fmt.Sprintf("%.1fs", float64(ms)/1000)
 }
 
 // ensureCursorVisible adjusts scroll so the cursor is always in the viewport
