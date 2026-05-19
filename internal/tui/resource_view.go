@@ -943,7 +943,7 @@ func (m resourceViewModel) renderPods() string {
 	restartsW := 4
 	ageW := 5
 
-	fixed := 4 + statusW + readyW
+	fixed := 5 + statusW + readyW
 	if showRestarts {
 		fixed += 1 + restartsW
 	}
@@ -1289,22 +1289,19 @@ func (m resourceViewModel) renderEvents() string {
 	inner := w
 	hline := strings.Repeat("━", inner)
 
-	showMsg := inner >= 70
-
 	typeW := 8
 	reasonW := 12
 	objectW := 20
 	ageW := 8
 
-	fixed := 4 + typeW + reasonW + objectW + ageW
-	nameW := inner - fixed
-	if nameW < 8 {
-		nameW = 8
+	msgW := inner - ageW - typeW - reasonW - objectW - 7
+	if msgW < 10 {
+		msgW = 10
 	}
 
 	var s strings.Builder
 	colHeader := fmt.Sprintf("   %-*s %-*s %-*s %-*s %-*s",
-		ageW, "LAST SEEN", typeW, "TYPE", reasonW, "REASON", objectW, "OBJECT", inner-fixed+nameW, "MESSAGE")
+		ageW, "LAST SEEN", typeW, "TYPE", reasonW, "REASON", objectW, "OBJECT", msgW, "MESSAGE")
 	s.WriteString(fmt.Sprintf("┃%-*s┃\n", inner, colHeader))
 	s.WriteString("┣" + hline + "┫\n")
 
@@ -1336,14 +1333,12 @@ func (m resourceViewModel) renderEvents() string {
 		reason := truncate(e.Reason, reasonW)
 		obj := truncate(e.Object, objectW)
 		msg := e.Message
-		if !showMsg && len(msg) > inner-fixed+nameW {
-			msg = msg[:inner-fixed+nameW]
-		} else if showMsg && len(msg) > inner-fixed+nameW {
-			msg = msg[:inner-fixed+nameW]
+		if len(msg) > msgW {
+			msg = msg[:msgW]
 		}
 
 		row := fmt.Sprintf(" %s %-*s %-*s %-*s %-*s %-*s",
-			cursor, ageW, age, typeW, etype, reasonW, reason, objectW, obj, inner-fixed+nameW, msg)
+			cursor, ageW, age, typeW, etype, reasonW, reason, objectW, obj, msgW, msg)
 		s.WriteString(fmt.Sprintf("┃%-*s┃\n", inner, row))
 		linesOut++
 	}
@@ -1442,7 +1437,7 @@ func (m resourceViewModel) renderCRDInstances() string {
 	showAge := inner >= 40
 
 	ageW := 5
-	fixed := 4
+	fixed := 3
 	nsW := 0
 	if showNamespace {
 		nsW = 16
