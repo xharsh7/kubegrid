@@ -188,8 +188,8 @@ func (m clusterViewModel) listView() string {
 		latencyW = 5
 	}
 
-	// Give cluster and context proportional space from what remains
-	remaining := inner - 3 - 1 - stateW - 1 - latencyW // " > " + gaps
+	// Row format: " %s %-*s %-*s %-*s %-*s" = 6 fixed chars
+	remaining := inner - 6 - stateW - latencyW
 	if remaining < 10 {
 		remaining = 10
 	}
