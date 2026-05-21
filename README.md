@@ -74,7 +74,17 @@ kubeconfig files in `~/.kube/` (files named `config` or `*.config`).
 
 ### Step 2: Install
 
-#### Option A: Clone & Build (recommended)
+#### Option A: Quick Install (recommended)
+
+```bash
+# Install latest version
+curl -fL https://raw.githubusercontent.com/xharsh7/kubegrid/main/scripts/install.sh | sh
+
+# Install specific version
+curl -fL https://raw.githubusercontent.com/xharsh7/kubegrid/main/scripts/install.sh | sh -s -- --version 1.0.1
+```
+
+#### Option B: Clone & Build
 
 ```bash
 git clone https://github.com/xharsh7/kubegrid.git
@@ -83,14 +93,14 @@ make build
 ./kubegrid
 ```
 
-#### Option B: Go Install
+#### Option C: Go Install
 
 ```bash
 go install github.com/xharsh7/kubegrid/cmd/kubegrid@latest
 kubegrid
 ```
 
-#### Option C: Download Binary
+#### Option D: Download Binary
 
 Grab a pre-built binary from the [Releases](https://github.com/xharsh7/kubegrid/releases) page:
 
